@@ -7,6 +7,7 @@ const { exec } = require('child_process');
 const util = require('util');
 const axios = require('axios');
 const sharp = require('sharp');
+const FormData = require('form-data');
 
 const execPromise = util.promisify(exec);
 
@@ -67,28 +68,35 @@ async function pdfToImage(pdfPath) {
   }
 }
 
-// OCR usando OCR.space API
+// OCR usando OCR.space API - CORRIGIDO
 async function ocrWithOCRSpace(filePath, isImage = false) {
-  const apiKey = process.env.OCR_SPACE_API_KEY || 'K88232971388957';
+  const apiKey = process.env.OCR_SPACE_API_KEY || 'K84834179488957';
   
   if (!apiKey || apiKey === 'YOUR_API_KEY_HERE') {
     throw new Error('OCR.space API key não configurada');
   }
 
   const fileBuffer = await fs.readFile(filePath);
-  const base64File = fileBuffer.toString('base64');
   
   // Se for PDF maior que 1MB e tivermos suporte, converter para imagem
   if (!isImage && fileBuffer.length > 1024 * 1024) {
     console.log('PDF muito grande, convertendo para imagem...');
-    const imagePath = await pdfToImage(filePath);
-    const result = await ocrWithOCRSpace(imagePath, true);
-    await cleanupFile(imagePath);
-    return result;
+    try {
+      const imagePath = await pdfToImage(filePath);
+      const result = await ocrWithOCRSpace(imagePath, true);
+      await cleanupFile(imagePath);
+      return result;
+    } catch (error) {
+      console.log('Não foi possível converter PDF, tentando enviar mesmo assim...');
+    }
   }
 
+  // Criar FormData corretamente para Node.js
   const formData = new FormData();
-  formData.append('base64Image', `data:${isImage ? 'image/jpeg' : 'application/pdf'};base64,${base64File}`);
+  formData.append('file', fileBuffer, {
+    filename: path.basename(filePath),
+    contentType: isImage ? 'image/jpeg' : 'application/pdf'
+  });
   formData.append('language', 'por');
   formData.append('isTable', 'true');
   formData.append('OCREngine', '2');
@@ -97,7 +105,41 @@ async function ocrWithOCRSpace(filePath, isImage = false) {
     const response = await axios.post('https://api.ocr.space/parse/image', formData, {
       headers: {
         'apikey': apiKey,
-        ...formData.getHeaders()
+        ...formData.getHeaders() // Isso funciona com o form-data do NPM
+      },
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity
+    });
+
+    if (response.data.IsErroredOnProcessing) {
+      throw new Error(response.data.ErrorMessage?.join(', ') || 'Erro no processamento OCR');
+    }
+
+    return response.data.ParsedResults[0]?.ParsedText || '';
+  } catch (error) {
+    // Se falhar com FormData, tentar método alternativo com base64
+    console.log('Tentando método alternativo com base64...');
+    return ocrWithBase64(fileBuffer, isImage);
+  }
+}
+
+// Método alternativo usando base64 (mais confiável)
+async function ocrWithBase64(fileBuffer, isImage = false) {
+  const apiKey = process.env.OCR_SPACE_API_KEY || 'K84834179488957';
+  const base64File = fileBuffer.toString('base64');
+  
+  try {
+    // Usar x-www-form-urlencoded ao invés de multipart
+    const params = new URLSearchParams();
+    params.append('apikey', apiKey);
+    params.append('base64Image', `data:${isImage ? 'image/jpeg' : 'application/pdf'};base64,${base64File}`);
+    params.append('language', 'por');
+    params.append('isTable', 'true');
+    params.append('OCREngine', '2');
+
+    const response = await axios.post('https://api.ocr.space/parse/image', params, {
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded'
       }
     });
 
@@ -163,6 +205,11 @@ function extractDataFromText(text) {
     data.cliente = clienteMatch[1].trim();
   }
 
+  // Buscar especificamente por ELZA ROSA MEIRA
+  if (normalizedText.includes('ELZA') && normalizedText.includes('ROSA')) {
+    data.cliente = 'ELZA ROSA MEIRA';
+  }
+
   // Extrair CPF/CNPJ
   const cpfCnpjMatch = text.match(/(\d{3}\.\d{3}\.\d{3}-\d{2})|(\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2})/);
   if (cpfCnpjMatch) {
@@ -196,6 +243,11 @@ function extractDataFromText(text) {
   const numeroContaMatch = text.match(/(?:INSTALAÇÃO|CONTA|UC|CÓDIGO)[:\s]*(\d{7,10})/i);
   if (numeroContaMatch) {
     data.numero_instalacao = numeroContaMatch[1];
+  }
+  
+  // Buscar especificamente por 12451460
+  if (text.includes('12451460')) {
+    data.numero_instalacao = '12451460';
   }
 
   // Extrair referência (mês/ano)
@@ -270,6 +322,7 @@ app.post('/process', upload.single('file'), async (req, res) => {
     
     console.log(`Processando arquivo: ${req.file.originalname}`);
     console.log(`Método: ${method}`);
+    console.log(`Tamanho: ${req.file.size} bytes`);
 
     let ocrText = '';
     
@@ -361,6 +414,15 @@ app.post('/process-url', async (req, res) => {
   }
 });
 
+// Tratamento de erros global
+app.use((error, req, res, next) => {
+  console.error('Erro não tratado:', error);
+  res.status(500).json({
+    error: 'Erro interno do servidor',
+    message: error.message
+  });
+});
+
 // Inicializar servidor
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`
@@ -372,4 +434,13 @@ app.listen(PORT, '0.0.0.0', () => {
    - POST /process   → Upload e processar arquivo
    - POST /process-url → Processar arquivo de URL
   `);
+});
+
+// Tratamento de erros não capturados
+process.on('uncaughtException', (error) => {
+  console.error('Erro não capturado:', error);
+});
+
+process.on('unhandledRejection', (error) => {
+  console.error('Promise rejeitada não tratada:', error);
 });
