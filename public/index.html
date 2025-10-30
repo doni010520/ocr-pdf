@@ -1,0 +1,750 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OCR Conta de Energia - Extrator Inteligente</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --primary: #4F46E5;
+            --primary-dark: #4338CA;
+            --secondary: #10B981;
+            --danger: #EF4444;
+            --dark: #1F2937;
+            --light: #F9FAFB;
+            --border: #E5E7EB;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .header {
+            text-align: center;
+            color: white;
+            margin-bottom: 30px;
+        }
+
+        .header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
+        }
+
+        .header p {
+            font-size: 1.1rem;
+            opacity: 0.95;
+        }
+
+        .main-card {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            padding: 30px;
+            animation: slideUp 0.5s ease;
+        }
+
+        @keyframes slideUp {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .upload-area {
+            border: 3px dashed var(--border);
+            border-radius: 15px;
+            padding: 40px;
+            text-align: center;
+            transition: all 0.3s ease;
+            cursor: pointer;
+            background: var(--light);
+        }
+
+        .upload-area:hover, .upload-area.dragover {
+            border-color: var(--primary);
+            background: #F3F4F6;
+        }
+
+        .upload-icon {
+            font-size: 3rem;
+            color: var(--primary);
+            margin-bottom: 15px;
+        }
+
+        .upload-text {
+            color: var(--dark);
+            font-size: 1.1rem;
+            margin-bottom: 10px;
+        }
+
+        .upload-subtext {
+            color: #6B7280;
+            font-size: 0.9rem;
+        }
+
+        #file-input {
+            display: none;
+        }
+
+        .file-info {
+            background: var(--light);
+            border-radius: 10px;
+            padding: 15px;
+            margin-top: 20px;
+            display: none;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .file-info.active {
+            display: flex;
+        }
+
+        .file-icon {
+            font-size: 2rem;
+        }
+
+        .file-details {
+            flex: 1;
+        }
+
+        .file-name {
+            font-weight: 600;
+            color: var(--dark);
+            margin-bottom: 5px;
+        }
+
+        .file-size {
+            color: #6B7280;
+            font-size: 0.9rem;
+        }
+
+        .btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .btn-primary {
+            background: var(--primary);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: var(--primary-dark);
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(79, 70, 229, 0.3);
+        }
+
+        .btn-primary:disabled {
+            background: #9CA3AF;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .btn-danger {
+            background: var(--danger);
+            color: white;
+        }
+
+        .processing {
+            display: none;
+            text-align: center;
+            padding: 40px;
+        }
+
+        .processing.active {
+            display: block;
+        }
+
+        .spinner {
+            width: 50px;
+            height: 50px;
+            border: 5px solid var(--border);
+            border-top-color: var(--primary);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .results {
+            display: none;
+            margin-top: 30px;
+        }
+
+        .results.active {
+            display: block;
+        }
+
+        .results-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 2px solid var(--border);
+        }
+
+        .results-title {
+            font-size: 1.5rem;
+            color: var(--dark);
+            font-weight: 700;
+        }
+
+        .status-badge {
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+
+        .status-success {
+            background: #D1FAE5;
+            color: #065F46;
+        }
+
+        .status-error {
+            background: #FEE2E2;
+            color: #991B1B;
+        }
+
+        .data-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .data-item {
+            background: var(--light);
+            padding: 15px;
+            border-radius: 10px;
+            border-left: 4px solid var(--primary);
+        }
+
+        .data-label {
+            font-size: 0.85rem;
+            color: #6B7280;
+            margin-bottom: 5px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .data-value {
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: var(--dark);
+        }
+
+        .data-value.highlight {
+            color: var(--primary);
+            font-size: 1.3rem;
+        }
+
+        .raw-text {
+            background: var(--dark);
+            color: #10B981;
+            padding: 20px;
+            border-radius: 10px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9rem;
+            line-height: 1.6;
+            max-height: 300px;
+            overflow-y: auto;
+            display: none;
+        }
+
+        .raw-text.active {
+            display: block;
+        }
+
+        .toggle-raw {
+            background: transparent;
+            border: 2px solid var(--primary);
+            color: var(--primary);
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            font-weight: 600;
+            transition: all 0.3s ease;
+        }
+
+        .toggle-raw:hover {
+            background: var(--primary);
+            color: white;
+        }
+
+        .error-message {
+            background: #FEE2E2;
+            color: #991B1B;
+            padding: 15px;
+            border-radius: 10px;
+            margin-top: 20px;
+            display: none;
+        }
+
+        .error-message.active {
+            display: block;
+        }
+
+        .actions {
+            display: flex;
+            gap: 15px;
+            margin-top: 20px;
+            flex-wrap: wrap;
+        }
+
+        @media (max-width: 768px) {
+            .header h1 {
+                font-size: 2rem;
+            }
+            
+            .data-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .results-header {
+                flex-direction: column;
+                align-items: start;
+                gap: 10px;
+            }
+        }
+
+        .url-input-container {
+            margin-top: 30px;
+            padding-top: 30px;
+            border-top: 2px solid var(--border);
+        }
+
+        .url-input-label {
+            font-weight: 600;
+            color: var(--dark);
+            margin-bottom: 10px;
+            display: block;
+        }
+
+        .url-input-group {
+            display: flex;
+            gap: 10px;
+        }
+
+        .url-input {
+            flex: 1;
+            padding: 12px;
+            border: 2px solid var(--border);
+            border-radius: 8px;
+            font-size: 1rem;
+            transition: border-color 0.3s ease;
+        }
+
+        .url-input:focus {
+            outline: none;
+            border-color: var(--primary);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>⚡ OCR Conta de Energia</h1>
+            <p>Extração inteligente de dados de contas de energia elétrica</p>
+        </div>
+
+        <div class="main-card">
+            <!-- Upload Area -->
+            <div class="upload-area" id="upload-area">
+                <div class="upload-icon">📄</div>
+                <div class="upload-text">Arraste seu PDF ou imagem aqui</div>
+                <div class="upload-subtext">ou clique para selecionar (máx. 10MB)</div>
+                <input type="file" id="file-input" accept=".pdf,.jpg,.jpeg,.png">
+            </div>
+
+            <!-- File Info -->
+            <div class="file-info" id="file-info">
+                <div class="file-icon">📋</div>
+                <div class="file-details">
+                    <div class="file-name" id="file-name"></div>
+                    <div class="file-size" id="file-size"></div>
+                </div>
+                <button class="btn btn-danger" id="remove-file">Remover</button>
+            </div>
+
+            <!-- Process Button -->
+            <div class="actions">
+                <button class="btn btn-primary" id="process-btn" disabled>
+                    <span>🔍</span> Processar Conta
+                </button>
+            </div>
+
+            <!-- URL Input -->
+            <div class="url-input-container">
+                <label class="url-input-label">Ou processar arquivo de uma URL:</label>
+                <div class="url-input-group">
+                    <input type="text" class="url-input" id="url-input" placeholder="https://exemplo.com/conta.pdf">
+                    <button class="btn btn-primary" id="process-url-btn">
+                        <span>🌐</span> Processar URL
+                    </button>
+                </div>
+            </div>
+
+            <!-- Processing -->
+            <div class="processing" id="processing">
+                <div class="spinner"></div>
+                <div>Processando documento...</div>
+                <div style="color: #6B7280; font-size: 0.9rem; margin-top: 10px;">
+                    Isso pode levar alguns segundos
+                </div>
+            </div>
+
+            <!-- Error Message -->
+            <div class="error-message" id="error-message"></div>
+
+            <!-- Results -->
+            <div class="results" id="results">
+                <div class="results-header">
+                    <h2 class="results-title">Dados Extraídos</h2>
+                    <span class="status-badge" id="status-badge"></span>
+                </div>
+
+                <div class="data-grid" id="data-grid"></div>
+
+                <div style="display: flex; gap: 15px; flex-wrap: wrap;">
+                    <button class="toggle-raw" id="toggle-raw">
+                        Ver Texto Bruto
+                    </button>
+                    <button class="btn btn-primary" id="download-json">
+                        <span>💾</span> Baixar JSON
+                    </button>
+                    <button class="btn btn-primary" id="new-upload">
+                        <span>📤</span> Nova Conta
+                    </button>
+                </div>
+
+                <pre class="raw-text" id="raw-text"></pre>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Elementos
+        const uploadArea = document.getElementById('upload-area');
+        const fileInput = document.getElementById('file-input');
+        const fileInfo = document.getElementById('file-info');
+        const fileName = document.getElementById('file-name');
+        const fileSize = document.getElementById('file-size');
+        const removeFile = document.getElementById('remove-file');
+        const processBtn = document.getElementById('process-btn');
+        const urlInput = document.getElementById('url-input');
+        const processUrlBtn = document.getElementById('process-url-btn');
+        const processing = document.getElementById('processing');
+        const results = document.getElementById('results');
+        const errorMessage = document.getElementById('error-message');
+        const dataGrid = document.getElementById('data-grid');
+        const rawText = document.getElementById('raw-text');
+        const toggleRaw = document.getElementById('toggle-raw');
+        const downloadJson = document.getElementById('download-json');
+        const newUpload = document.getElementById('new-upload');
+        const statusBadge = document.getElementById('status-badge');
+
+        let selectedFile = null;
+        let currentData = null;
+
+        // Upload área eventos
+        uploadArea.addEventListener('click', () => fileInput.click());
+        
+        uploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadArea.classList.add('dragover');
+        });
+
+        uploadArea.addEventListener('dragleave', () => {
+            uploadArea.classList.remove('dragover');
+        });
+
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('dragover');
+            
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                handleFile(files[0]);
+            }
+        });
+
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                handleFile(e.target.files[0]);
+            }
+        });
+
+        removeFile.addEventListener('click', () => {
+            selectedFile = null;
+            fileInput.value = '';
+            fileInfo.classList.remove('active');
+            processBtn.disabled = true;
+            uploadArea.style.display = 'block';
+        });
+
+        function handleFile(file) {
+            // Validar tamanho
+            if (file.size > 10 * 1024 * 1024) {
+                showError('Arquivo muito grande. Máximo 10MB.');
+                return;
+            }
+
+            // Validar tipo
+            const validTypes = ['application/pdf', 'image/jpeg', 'image/jpg', 'image/png'];
+            if (!validTypes.includes(file.type)) {
+                showError('Tipo de arquivo inválido. Use PDF, JPG ou PNG.');
+                return;
+            }
+
+            selectedFile = file;
+            fileName.textContent = file.name;
+            fileSize.textContent = formatFileSize(file.size);
+            fileInfo.classList.add('active');
+            processBtn.disabled = false;
+            uploadArea.style.display = 'none';
+            hideError();
+        }
+
+        function formatFileSize(bytes) {
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+            return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+        }
+
+        // Processar arquivo
+        processBtn.addEventListener('click', async () => {
+            if (!selectedFile) return;
+
+            const formData = new FormData();
+            formData.append('file', selectedFile);
+            formData.append('method', 'auto');
+
+            processing.classList.add('active');
+            results.classList.remove('active');
+            hideError();
+
+            try {
+                const response = await fetch('/process', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(data.error || 'Erro ao processar arquivo');
+                }
+
+                currentData = data;
+                displayResults(data);
+
+            } catch (error) {
+                showError(error.message);
+            } finally {
+                processing.classList.remove('active');
+            }
+        });
+
+        // Processar URL
+        processUrlBtn.addEventListener('click', async () => {
+            const url = urlInput.value.trim();
+            if (!url) {
+                showError('Por favor, insira uma URL válida');
+                return;
+            }
+
+            processing.classList.add('active');
+            results.classList.remove('active');
+            hideError();
+
+            try {
+                const response = await fetch('/process-url', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ url })
+                });
+
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(data.error || 'Erro ao processar URL');
+                }
+
+                currentData = data;
+                displayResults(data);
+
+            } catch (error) {
+                showError(error.message);
+            } finally {
+                processing.classList.remove('active');
+            }
+        });
+
+        function displayResults(data) {
+            results.classList.add('active');
+            
+            // Status
+            if (data.success) {
+                statusBadge.className = 'status-badge status-success';
+                statusBadge.textContent = '✓ Processado com sucesso';
+            } else {
+                statusBadge.className = 'status-badge status-error';
+                statusBadge.textContent = '✗ Erro no processamento';
+            }
+
+            // Limpar grid
+            dataGrid.innerHTML = '';
+
+            // Dados importantes primeiro
+            const priorityFields = ['valor_total', 'vencimento', 'cliente', 'consumo_kwh'];
+            const extractedData = data.extracted_data || {};
+
+            // Mostrar campos prioritários
+            priorityFields.forEach(field => {
+                if (extractedData[field]) {
+                    addDataItem(field, extractedData[field], true);
+                }
+            });
+
+            // Mostrar outros campos
+            Object.keys(extractedData).forEach(field => {
+                if (!priorityFields.includes(field) && extractedData[field]) {
+                    addDataItem(field, extractedData[field], false);
+                }
+            });
+
+            // Texto bruto
+            if (data.raw_text) {
+                rawText.textContent = data.raw_text;
+            }
+        }
+
+        function addDataItem(label, value, isHighlight = false) {
+            const item = document.createElement('div');
+            item.className = 'data-item';
+            
+            const labelEl = document.createElement('div');
+            labelEl.className = 'data-label';
+            labelEl.textContent = formatLabel(label);
+            
+            const valueEl = document.createElement('div');
+            valueEl.className = isHighlight ? 'data-value highlight' : 'data-value';
+            valueEl.textContent = value || 'Não identificado';
+            
+            item.appendChild(labelEl);
+            item.appendChild(valueEl);
+            dataGrid.appendChild(item);
+        }
+
+        function formatLabel(label) {
+            const labels = {
+                'valor_total': 'Valor Total',
+                'vencimento': 'Vencimento',
+                'cliente': 'Cliente',
+                'consumo_kwh': 'Consumo (kWh)',
+                'empresa': 'Empresa',
+                'cpf_cnpj': 'CPF/CNPJ',
+                'numero_instalacao': 'Nº Instalação',
+                'numero_cliente': 'Nº Cliente',
+                'referencia': 'Referência',
+                'tensao': 'Tensão',
+                'leitura_anterior': 'Leitura Anterior',
+                'leitura_atual': 'Leitura Atual',
+                'proxima_leitura': 'Próxima Leitura',
+                'dias_faturamento': 'Dias Faturados',
+                'nota_fiscal': 'Nota Fiscal',
+                'chave_acesso': 'Chave de Acesso',
+                'bandeira_tarifaria': 'Bandeira',
+                'endereco': 'Endereço'
+            };
+            return labels[label] || label;
+        }
+
+        // Toggle texto bruto
+        toggleRaw.addEventListener('click', () => {
+            rawText.classList.toggle('active');
+            toggleRaw.textContent = rawText.classList.contains('active') ? 
+                'Ocultar Texto Bruto' : 'Ver Texto Bruto';
+        });
+
+        // Download JSON
+        downloadJson.addEventListener('click', () => {
+            if (!currentData) return;
+            
+            const blob = new Blob([JSON.stringify(currentData, null, 2)], 
+                { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'conta_energia_' + Date.now() + '.json';
+            a.click();
+            URL.revokeObjectURL(url);
+        });
+
+        // Nova conta
+        newUpload.addEventListener('click', () => {
+            selectedFile = null;
+            fileInput.value = '';
+            urlInput.value = '';
+            fileInfo.classList.remove('active');
+            results.classList.remove('active');
+            processBtn.disabled = true;
+            uploadArea.style.display = 'block';
+            rawText.classList.remove('active');
+            toggleRaw.textContent = 'Ver Texto Bruto';
+            hideError();
+        });
+
+        function showError(message) {
+            errorMessage.textContent = '❌ ' + message;
+            errorMessage.classList.add('active');
+        }
+
+        function hideError() {
+            errorMessage.classList.remove('active');
+        }
+
+        // Check API status on load
+        fetch('/status')
+            .then(r => r.json())
+            .then(data => console.log('API Status:', data))
+            .catch(e => console.error('API Error:', e));
+    </script>
+</body>
+</html>

@@ -1,0 +1,50 @@
+# EasyPanel Configuration
+# Este arquivo facilita o deploy no EasyPanel
+
+name: ocr-conta-energia
+type: app
+port: 4545
+
+# Build configuration
+build:
+  type: dockerfile
+  dockerfile: Dockerfile
+
+# Environment variables
+env:
+  PORT: 4545
+  NODE_ENV: production
+  OCR_SPACE_API_KEY: ${OCR_SPACE_API_KEY}
+
+# Resources (ajuste conforme necessário)
+resources:
+  memory: 512M
+  cpu: 0.5
+
+# Health check
+healthcheck:
+  path: /status
+  interval: 30s
+  timeout: 10s
+  retries: 3
+
+# Domains (adicione seu domínio)
+domains:
+  - ocr.seu-dominio.com
+
+# Volumes (persistir uploads)
+volumes:
+  - name: uploads
+    path: /app/uploads
+    size: 1Gi
+
+# Deploy instructions
+deploy_instructions: |
+  1. Fork este repositório no GitHub
+  2. No EasyPanel, crie novo serviço do tipo "GitHub"
+  3. Configure as variáveis de ambiente:
+     - OCR_SPACE_API_KEY: Sua chave da API OCR.space
+  4. Configure a porta: 4545
+  5. Deploy!
+  
+  Obtenha sua API key gratuita em: https://ocr.space/ocrapi

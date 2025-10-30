@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  ocr-app:
+    build: .
+    container_name: ocr-conta-energia
+    ports:
+      - "4545:4545"
+    environment:
+      - PORT=4545
+      - OCR_SPACE_API_KEY=${OCR_SPACE_API_KEY:-YOUR_API_KEY_HERE}
+      - NODE_ENV=production
+    volumes:
+      - ./uploads:/app/uploads
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:4545/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - ocr-network
+
+networks:
+  ocr-network:
+    driver: bridge
