@@ -581,6 +581,101 @@ app.get('/capabilities', (req, res) => {
   });
 });
 
+/**
+ * Rota para processar arquivo via URL
+ */
+app.post('/process-url', async (req, res) => {
+  const { url } = req.body;
+  
+  if (!url) {
+    return res.status(400).json({ error: 'URL não fornecida' });
+  }
+
+  let tempFile = null;
+  
+  try {
+    console.log(`📥 Baixando arquivo de: ${url}`);
+    
+    // Baixar arquivo da URL
+    const response = await axios.get(url, { 
+      responseType: 'arraybuffer',
+      maxContentLength: 50 * 1024 * 1024, // 50MB max
+      timeout: 30000 // 30 segundos
+    });
+    
+    // Determinar extensão do arquivo
+    const contentType = response.headers['content-type'];
+    let extension = '.pdf';
+    
+    if (contentType) {
+      if (contentType.includes('image')) {
+        if (contentType.includes('jpeg') || contentType.includes('jpg')) extension = '.jpg';
+        else if (contentType.includes('png')) extension = '.png';
+        else if (contentType.includes('gif')) extension = '.gif';
+      }
+    } else {
+      // Tentar pegar extensão da URL
+      const urlPath = new URL(url).pathname;
+      const urlExt = path.extname(urlPath);
+      if (urlExt) extension = urlExt;
+    }
+    
+    // Salvar arquivo temporário
+    tempFile = `uploads/url-${Date.now()}${extension}`;
+    await fs.mkdir('uploads', { recursive: true });
+    await fs.writeFile(tempFile, response.data);
+    
+    console.log(`✅ Arquivo baixado: ${(response.data.length / 1024).toFixed(2)} KB`);
+    
+    // Processar arquivo como se fosse upload
+    let ocrText = '';
+    let processInfo = {};
+    
+    // Analisar se for PDF
+    if (extension === '.pdf') {
+      console.log('🔍 Analisando PDF baixado...');
+      const pdfAnalysis = await analyzePDF(tempFile);
+      processInfo = pdfAnalysis;
+      ocrText = await smartOCR(tempFile, pdfAnalysis);
+    } else {
+      // É uma imagem
+      console.log('🖼️ Processando imagem baixada...');
+      ocrText = await ocrFile(tempFile, process.env.OCR_SPACE_API_KEY);
+      processInfo.isImage = true;
+    }
+    
+    // Extrair dados
+    const extractedData = smartDataExtraction(ocrText);
+    
+    // Resposta
+    res.json({
+      success: true,
+      url: url,
+      file_info: {
+        size: response.data.length,
+        type: contentType || 'application/octet-stream'
+      },
+      processing_info: processInfo,
+      document_type: extractedData.tipo_documento || 'Não identificado',
+      extracted_data: extractedData,
+      confidence_score: extractedData.qualidade_extracao?.confianca || 0,
+      processed_at: new Date().toISOString()
+    });
+    
+  } catch (error) {
+    console.error('❌ Erro ao processar URL:', error);
+    res.status(500).json({ 
+      error: error.message,
+      details: 'Verifique se a URL é válida e acessível'
+    });
+  } finally {
+    // Limpar arquivo temporário
+    if (tempFile) {
+      await fs.unlink(tempFile).catch(() => {});
+    }
+  }
+});
+
 // Tratamento de erros
 app.use((error, req, res, next) => {
   console.error('Erro não tratado:', error);
