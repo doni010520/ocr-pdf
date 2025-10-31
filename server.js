@@ -21,7 +21,7 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static('public'));
 
-// Configuração do Multer para upload
+// Configuração do Multer
 const storage = multer.diskStorage({
   destination: async (req, file, cb) => {
     const uploadDir = 'uploads/';
@@ -37,278 +37,402 @@ const storage = multer.diskStorage({
 const upload = multer({ 
   storage: storage,
   limits: {
-    fileSize: 10 * 1024 * 1024 // 10MB max
+    fileSize: 50 * 1024 * 1024 // 50MB max
   }
 });
 
-// Função auxiliar para limpar arquivos temporários
-async function cleanupFile(filePath) {
+// ==================== FUNÇÕES INTELIGENTES ====================
+
+/**
+ * Detecta se o PDF tem texto extraível ou é baseado em imagem
+ */
+async function analyzePDF(pdfPath) {
   try {
-    await fs.unlink(filePath);
+    // Tentar extrair texto com pdftotext
+    const { stdout: textContent } = await execPromise(`pdftotext "${pdfPath}" - 2>/dev/null | head -c 1000`);
+    
+    // Contar caracteres úteis (não apenas espaços)
+    const meaningfulChars = textContent.replace(/\s/g, '').length;
+    
+    // Obter informações do PDF
+    const { stdout: pdfInfo } = await execPromise(`pdfinfo "${pdfPath}" 2>/dev/null || echo ""`);
+    
+    // Verificar tamanho do arquivo
+    const stats = await fs.stat(pdfPath);
+    const fileSizeKB = stats.size / 1024;
+    
+    return {
+      hasText: meaningfulChars > 50, // Se tem mais de 50 caracteres, provavelmente tem texto
+      textContent: textContent,
+      fileSize: stats.size,
+      fileSizeKB: fileSizeKB,
+      needsOCR: meaningfulChars <= 50,
+      shouldConvertToImage: fileSizeKB > 1024, // Se > 1MB e precisa OCR
+      pdfInfo: pdfInfo
+    };
   } catch (error) {
-    console.error(`Erro ao deletar arquivo ${filePath}:`, error);
+    console.error('Erro ao analisar PDF:', error);
+    // Se não conseguir analisar, assumir que precisa OCR
+    return {
+      hasText: false,
+      textContent: '',
+      fileSize: 0,
+      fileSizeKB: 0,
+      needsOCR: true,
+      shouldConvertToImage: true,
+      error: error.message
+    };
   }
 }
 
-// Converter PDF para imagem usando pdftoppm
-async function pdfToImage(pdfPath) {
+/**
+ * Converte PDF para imagem de forma otimizada
+ */
+async function pdfToImageOptimized(pdfPath, targetSizeKB = 900) {
   const outputPath = pdfPath.replace('.pdf', '.jpg');
   
   try {
-    // Tentar usar pdftoppm se disponível
-    await execPromise(`pdftoppm -jpeg -r 150 -f 1 -l 1 "${pdfPath}" "${pdfPath.replace('.pdf', '')}"`);
-    await execPromise(`mv "${pdfPath.replace('.pdf', '')}-1.jpg" "${outputPath}"`);
-    return outputPath;
-  } catch (error) {
-    console.log('pdftoppm não disponível, tentando método alternativo...');
+    // Começar com resolução alta e ir diminuindo se necessário
+    const resolutions = [200, 150, 120, 100, 80];
     
-    // Método alternativo: usar sharp para processar se já for imagem
-    // ou retornar erro se for PDF sem conversor
-    throw new Error('Conversão PDF requer pdftoppm instalado. Use: apt-get install poppler-utils');
-  }
-}
-
-// OCR usando OCR.space API - CORRIGIDO
-async function ocrWithOCRSpace(filePath, isImage = false) {
-  const apiKey = process.env.OCR_SPACE_API_KEY || 'K84834179488957';
-  
-  if (!apiKey || apiKey === 'YOUR_API_KEY_HERE') {
-    throw new Error('OCR.space API key não configurada');
-  }
-
-  const fileBuffer = await fs.readFile(filePath);
-  
-  // Se for PDF maior que 1MB e tivermos suporte, converter para imagem
-  if (!isImage && fileBuffer.length > 1024 * 1024) {
-    console.log('PDF muito grande, convertendo para imagem...');
-    try {
-      const imagePath = await pdfToImage(filePath);
-      const result = await ocrWithOCRSpace(imagePath, true);
-      await cleanupFile(imagePath);
-      return result;
-    } catch (error) {
-      console.log('Não foi possível converter PDF, tentando enviar mesmo assim...');
+    for (const resolution of resolutions) {
+      await execPromise(`pdftoppm -jpeg -r ${resolution} -f 1 -l 1 "${pdfPath}" "${pdfPath.replace('.pdf', '')}"`);
+      await execPromise(`mv "${pdfPath.replace('.pdf', '')}-1.jpg" "${outputPath}"`);
+      
+      // Verificar tamanho do arquivo gerado
+      const stats = await fs.stat(outputPath);
+      const sizeKB = stats.size / 1024;
+      
+      console.log(`Imagem gerada com resolução ${resolution}dpi: ${sizeKB.toFixed(2)}KB`);
+      
+      if (sizeKB <= targetSizeKB) {
+        return outputPath;
+      }
     }
-  }
-
-  // Criar FormData corretamente para Node.js
-  const formData = new FormData();
-  formData.append('file', fileBuffer, {
-    filename: path.basename(filePath),
-    contentType: isImage ? 'image/jpeg' : 'application/pdf'
-  });
-  formData.append('language', 'por');
-  formData.append('isTable', 'true');
-  formData.append('OCREngine', '2');
-
-  try {
-    const response = await axios.post('https://api.ocr.space/parse/image', formData, {
-      headers: {
-        'apikey': apiKey,
-        ...formData.getHeaders() // Isso funciona com o form-data do NPM
-      },
-      maxBodyLength: Infinity,
-      maxContentLength: Infinity
-    });
-
-    if (response.data.IsErroredOnProcessing) {
-      throw new Error(response.data.ErrorMessage?.join(', ') || 'Erro no processamento OCR');
-    }
-
-    return response.data.ParsedResults[0]?.ParsedText || '';
+    
+    // Se ainda estiver grande, comprimir com sharp
+    const buffer = await fs.readFile(outputPath);
+    const compressed = await sharp(buffer)
+      .jpeg({ quality: 70 })
+      .toBuffer();
+    
+    await fs.writeFile(outputPath, compressed);
+    return outputPath;
+    
   } catch (error) {
-    // Se falhar com FormData, tentar método alternativo com base64
-    console.log('Tentando método alternativo com base64...');
-    return ocrWithBase64(fileBuffer, isImage);
+    console.log('Erro na conversão PDF->Imagem:', error.message);
+    throw error;
   }
 }
 
-// Método alternativo usando base64 (mais confiável)
-async function ocrWithBase64(fileBuffer, isImage = false) {
+/**
+ * OCR inteligente que escolhe o melhor método
+ */
+async function smartOCR(filePath, fileInfo = {}) {
   const apiKey = process.env.OCR_SPACE_API_KEY || 'K84834179488957';
+  
+  // Se o arquivo já tem texto, extrair diretamente
+  if (fileInfo.hasText && fileInfo.textContent) {
+    console.log('PDF tem texto nativo, extraindo diretamente...');
+    const { stdout } = await execPromise(`pdftotext "${filePath}" -`);
+    return stdout;
+  }
+  
+  // Se precisa OCR e é maior que 1MB, converter para imagem
+  if (fileInfo.needsOCR && fileInfo.fileSizeKB > 1024) {
+    console.log('PDF baseado em imagem e > 1MB, convertendo...');
+    const imagePath = await pdfToImageOptimized(filePath);
+    const result = await ocrImage(imagePath, apiKey);
+    await fs.unlink(imagePath).catch(() => {}); // Limpar imagem temporária
+    return result;
+  }
+  
+  // Se é pequeno o suficiente, enviar direto
+  console.log('Enviando arquivo direto para OCR...');
+  return await ocrFile(filePath, apiKey);
+}
+
+/**
+ * OCR de arquivo (PDF ou imagem)
+ */
+async function ocrFile(filePath, apiKey) {
+  const fileBuffer = await fs.readFile(filePath);
   const base64File = fileBuffer.toString('base64');
+  const isImage = /\.(jpg|jpeg|png|gif|bmp)$/i.test(filePath);
+  
+  const params = new URLSearchParams();
+  params.append('apikey', apiKey);
+  params.append('base64Image', `data:${isImage ? 'image/jpeg' : 'application/pdf'};base64,${base64File}`);
+  params.append('language', 'por');
+  params.append('isTable', 'true');
+  params.append('OCREngine', '2');
+  params.append('scale', 'true');
+  params.append('detectOrientation', 'true');
   
   try {
-    // Usar x-www-form-urlencoded ao invés de multipart
-    const params = new URLSearchParams();
-    params.append('apikey', apiKey);
-    params.append('base64Image', `data:${isImage ? 'image/jpeg' : 'application/pdf'};base64,${base64File}`);
-    params.append('language', 'por');
-    params.append('isTable', 'true');
-    params.append('OCREngine', '2');
-
     const response = await axios.post('https://api.ocr.space/parse/image', params, {
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded'
-      }
+      },
+      maxBodyLength: Infinity,
+      timeout: 60000 // 60 segundos timeout
     });
 
     if (response.data.IsErroredOnProcessing) {
-      throw new Error(response.data.ErrorMessage?.join(', ') || 'Erro no processamento OCR');
+      throw new Error(response.data.ErrorMessage?.join(', ') || 'Erro no OCR');
     }
 
     return response.data.ParsedResults[0]?.ParsedText || '';
   } catch (error) {
-    throw new Error(`Erro na API OCR.space: ${error.message}`);
+    throw new Error(`OCR Error: ${error.message}`);
   }
 }
 
-// OCR usando Tesseract local
-async function ocrWithTesseract(imagePath) {
-  try {
-    const { stdout } = await execPromise(`tesseract "${imagePath}" stdout -l por`);
-    return stdout;
-  } catch (error) {
-    throw new Error('Tesseract não disponível. Instale com: apt-get install tesseract-ocr tesseract-ocr-por');
-  }
+/**
+ * OCR específico para imagens
+ */
+async function ocrImage(imagePath, apiKey) {
+  return ocrFile(imagePath, apiKey);
 }
 
-// Extrair dados estruturados do texto OCR
-function extractDataFromText(text) {
+/**
+ * Extração inteligente de dados usando padrões e heurísticas
+ */
+function smartDataExtraction(text) {
   const data = {
-    tipo_documento: 'Conta de Energia Elétrica',
-    empresa: null,
-    cliente: null,
-    cpf_cnpj: null,
-    endereco: null,
-    numero_instalacao: null,
-    numero_cliente: null,
-    referencia: null,
-    vencimento: null,
-    valor_total: null,
-    consumo_kwh: null,
-    tensao: null,
-    leitura_anterior: null,
-    leitura_atual: null,
-    proxima_leitura: null,
-    dias_faturamento: null,
-    nota_fiscal: null,
-    chave_acesso: null,
-    bandeira_tarifaria: null
+    tipo_documento: null,
+    dados_extraidos: {},
+    valores_monetarios: [],
+    datas: [],
+    numeros_documento: [],
+    emails: [],
+    telefones: [],
+    cpf_cnpj: [],
+    enderecos: [],
+    nomes_proprios: [],
+    empresas: [],
+    palavras_chave: []
   };
-
+  
   // Normalizar texto
-  const normalizedText = text.replace(/\s+/g, ' ').toUpperCase();
-
-  // Identificar empresa
-  if (normalizedText.includes('EQUATORIAL')) {
-    data.empresa = 'Equatorial Goiás Distribuidora de Energia S.A.';
-  } else if (normalizedText.includes('ENEL')) {
-    data.empresa = 'Enel Distribuição';
-  } else if (normalizedText.includes('CEMIG')) {
-    data.empresa = 'CEMIG';
-  }
-
-  // Extrair cliente
-  const clienteMatch = normalizedText.match(/(?:CLIENTE|NOME)[:\s]+([A-Z\s]+?)(?:\n|CPF|CNPJ|RUA|AV)/);
-  if (clienteMatch) {
-    data.cliente = clienteMatch[1].trim();
-  }
-
-  // Buscar especificamente por ELZA ROSA MEIRA
-  if (normalizedText.includes('ELZA') && normalizedText.includes('ROSA')) {
-    data.cliente = 'ELZA ROSA MEIRA';
-  }
-
-  // Extrair CPF/CNPJ
-  const cpfCnpjMatch = text.match(/(\d{3}\.\d{3}\.\d{3}-\d{2})|(\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2})/);
-  if (cpfCnpjMatch) {
-    data.cpf_cnpj = cpfCnpjMatch[0];
-  }
-
-  // Extrair vencimento
-  const vencimentoMatch = text.match(/(?:VENCIMENTO|VENCE|VENCTO)[:\s]*(\d{2}\/\d{2}\/\d{4})/i);
-  if (vencimentoMatch) {
-    data.vencimento = vencimentoMatch[1];
-  }
-
-  // Extrair valor total (procurar o maior valor precedido de R$)
-  const valoresMatch = text.match(/R\$\s*\**\s*([\d.,]+)/g);
-  if (valoresMatch) {
-    const valores = valoresMatch.map(v => {
-      const num = v.replace(/[R$\s*]/g, '').replace('.', '').replace(',', '.');
-      return parseFloat(num);
-    });
-    const maxValor = Math.max(...valores);
-    data.valor_total = `R$ ${maxValor.toFixed(2).replace('.', ',')}`;
-  }
-
-  // Extrair consumo kWh
-  const consumoMatch = text.match(/(\d+)\s*KWH/i);
-  if (consumoMatch) {
-    data.consumo_kwh = parseInt(consumoMatch[1]);
-  }
-
-  // Extrair número da instalação/conta
-  const numeroContaMatch = text.match(/(?:INSTALAÇÃO|CONTA|UC|CÓDIGO)[:\s]*(\d{7,10})/i);
-  if (numeroContaMatch) {
-    data.numero_instalacao = numeroContaMatch[1];
+  const normalizedText = text.replace(/\s+/g, ' ');
+  
+  // ========== IDENTIFICAR TIPO DE DOCUMENTO ==========
+  
+  if (/(?:CONTA|FATURA).*(?:ENERGIA|LUZ|ELETRICA|ELÉTRICA)/i.test(text)) {
+    data.tipo_documento = 'Conta de Energia';
+  } else if (/(?:NOTA\s*FISCAL|NF-?e|DANFE)/i.test(text)) {
+    data.tipo_documento = 'Nota Fiscal';
+  } else if (/(?:BOLETO|COBRANÇA|PAGAMENTO)/i.test(text)) {
+    data.tipo_documento = 'Boleto';
+  } else if (/(?:CONTRATO|ACORDO|TERMO)/i.test(text)) {
+    data.tipo_documento = 'Contrato';
+  } else if (/(?:EXTRATO|SALDO|MOVIMENTAÇÃO)/i.test(text)) {
+    data.tipo_documento = 'Extrato Bancário';
+  } else if (/(?:CURRICULUM|CURRÍCULO|RESUME|CV)/i.test(text)) {
+    data.tipo_documento = 'Currículo';
+  } else if (/(?:RECEITA|PRESCRIÇÃO|MÉDICA?O)/i.test(text)) {
+    data.tipo_documento = 'Receita Médica';
+  } else if (/(?:CERTIDÃO|CERTIFICADO|DIPLOMA)/i.test(text)) {
+    data.tipo_documento = 'Certidão/Certificado';
+  } else if (/(?:ORÇAMENTO|PROPOSTA|COTAÇÃO)/i.test(text)) {
+    data.tipo_documento = 'Orçamento';
+  } else if (/(?:RECIBO|COMPROVANTE)/i.test(text)) {
+    data.tipo_documento = 'Recibo';
   }
   
-  // Buscar especificamente por 12451460
-  if (text.includes('12451460')) {
-    data.numero_instalacao = '12451460';
+  // ========== EXTRAÇÕES GENÉRICAS ==========
+  
+  // Valores monetários
+  const valoresRegex = /R\$\s*[\d.,]+|(?:R\$|RS)\s*\d+(?:[.,]\d{3})*(?:[.,]\d{2})?|\d+(?:[.,]\d{3})*(?:[.,]\d{2})\s*(?:reais|REAIS)/g;
+  const valores = text.match(valoresRegex) || [];
+  data.valores_monetarios = valores.map(v => {
+    const numero = v.replace(/[^\d.,]/g, '').replace(',', '.');
+    return {
+      texto_original: v,
+      valor_numerico: parseFloat(numero) || 0
+    };
+  });
+  
+  // Datas
+  const datasRegex = /\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}|\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2}/g;
+  data.datas = [...new Set(text.match(datasRegex) || [])];
+  
+  // CPF/CNPJ
+  const cpfRegex = /\d{3}\.\d{3}\.\d{3}-\d{2}|\d{11}/g;
+  const cnpjRegex = /\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}|\d{14}/g;
+  data.cpf_cnpj = [
+    ...(text.match(cpfRegex) || []).map(cpf => ({ tipo: 'CPF', valor: cpf })),
+    ...(text.match(cnpjRegex) || []).map(cnpj => ({ tipo: 'CNPJ', valor: cnpj }))
+  ];
+  
+  // Emails
+  const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+  data.emails = [...new Set(text.match(emailRegex) || [])];
+  
+  // Telefones
+  const telefoneRegex = /(?:\+?55\s?)?(?:\(?\d{2}\)?\s?)?(?:9\s?)?\d{4}[-\s]?\d{4}/g;
+  data.telefones = [...new Set(text.match(telefoneRegex) || [])];
+  
+  // Números de documentos (NF, protocolo, etc)
+  const numeroDocRegex = /(?:NF|NOTA|PROTOCOLO|CÓDIGO|REGISTRO|REF|Nº|N°|#)\s*:?\s*(\d+[\d\-\.\/]*)/gi;
+  const numerosDoc = [];
+  let matchNum;
+  while ((matchNum = numeroDocRegex.exec(text)) !== null) {
+    numerosDoc.push({
+      tipo: matchNum[0].split(/\s*:?\s*/)[0],
+      numero: matchNum[1]
+    });
   }
-
-  // Extrair referência (mês/ano)
-  const referenciaMatch = text.match(/(?:REFERÊNCIA|REFERENTE|MÊS)[:\s]*(\d{2}\/\d{4}|\w+\/\d{4})/i);
-  if (referenciaMatch) {
-    data.referencia = referenciaMatch[1];
+  data.numeros_documento = numerosDoc;
+  
+  // ========== EXTRAÇÕES ESPECÍFICAS POR TIPO ==========
+  
+  if (data.tipo_documento === 'Conta de Energia') {
+    data.dados_extraidos = extractEnergiaData(text);
+  } else if (data.tipo_documento === 'Nota Fiscal') {
+    data.dados_extraidos = extractNotaFiscalData(text);
+  } else if (data.tipo_documento === 'Boleto') {
+    data.dados_extraidos = extractBoletoData(text);
   }
-
-  // Extrair leituras
-  const leituraAnteriorMatch = text.match(/(?:LEITURA\s+ANTERIOR)[:\s]*(\d+)/i);
-  if (leituraAnteriorMatch) {
-    data.leitura_anterior = parseInt(leituraAnteriorMatch[1]);
-  }
-
-  const leituraAtualMatch = text.match(/(?:LEITURA\s+ATUAL)[:\s]*(\d+)/i);
-  if (leituraAtualMatch) {
-    data.leitura_atual = parseInt(leituraAtualMatch[1]);
-  }
-
-  // Extrair nota fiscal
-  const notaFiscalMatch = text.match(/(?:NOTA\s+FISCAL|NF)[:\s]*(\d{6,10})/i);
-  if (notaFiscalMatch) {
-    data.nota_fiscal = notaFiscalMatch[1];
-  }
-
-  // Extrair dias de faturamento
-  const diasMatch = text.match(/(\d+)\s*DIAS/i);
-  if (diasMatch) {
-    data.dias_faturamento = parseInt(diasMatch[1]);
-  }
-
-  // Extrair bandeira tarifária
-  if (normalizedText.includes('BANDEIRA VERDE')) {
-    data.bandeira_tarifaria = 'Verde';
-  } else if (normalizedText.includes('BANDEIRA AMARELA')) {
-    data.bandeira_tarifaria = 'Amarela';
-  } else if (normalizedText.includes('BANDEIRA VERMELHA')) {
-    data.bandeira_tarifaria = 'Vermelha';
-  }
-
+  
+  // ========== PALAVRAS-CHAVE E ENTIDADES ==========
+  
+  // Identificar possíveis nomes de empresas (palavras em maiúscula)
+  const empresasRegex = /[A-Z][A-Z\s]{3,}(?:S\.?A\.?|LTDA|ME|EPP|EIRELI|S\/A|IND(?:ÚSTRIA)?|COM(?:ÉRCIO)?)/g;
+  data.empresas = [...new Set(text.match(empresasRegex) || [])].map(e => e.trim());
+  
+  // Palavras importantes (maiúsculas com mais de 4 letras)
+  const palavrasImportantes = text.match(/\b[A-Z]{4,}\b/g) || [];
+  data.palavras_chave = [...new Set(palavrasImportantes)].slice(0, 20);
+  
+  // ========== ANÁLISE DE CONFIANÇA ==========
+  
+  data.qualidade_extracao = {
+    total_caracteres: text.length,
+    tem_dados_estruturados: Object.keys(data.dados_extraidos).length > 0,
+    quantidade_valores: data.valores_monetarios.length,
+    quantidade_datas: data.datas.length,
+    confianca: calculateConfidence(data)
+  };
+  
   return data;
 }
 
-// Rota principal - servir página HTML
+/**
+ * Calcula confiança na extração
+ */
+function calculateConfidence(data) {
+  let score = 0;
+  
+  if (data.tipo_documento) score += 20;
+  if (data.valores_monetarios.length > 0) score += 15;
+  if (data.datas.length > 0) score += 15;
+  if (data.cpf_cnpj.length > 0) score += 15;
+  if (Object.keys(data.dados_extraidos).length > 3) score += 20;
+  if (data.empresas.length > 0) score += 15;
+  
+  return Math.min(score, 100);
+}
+
+/**
+ * Extração específica para conta de energia
+ */
+function extractEnergiaData(text) {
+  const data = {};
+  
+  // Cliente
+  const clienteMatch = text.match(/(?:CLIENTE|NOME|TITULAR)[:\s]+([^\n]+)/i);
+  if (clienteMatch) data.cliente = clienteMatch[1].trim();
+  
+  // Vencimento
+  const vencMatch = text.match(/(?:VENCIMENTO|VENCE)[:\s]*(\d{2}[\/\-]\d{2}[\/\-]\d{4})/i);
+  if (vencMatch) data.vencimento = vencMatch[1];
+  
+  // Valor
+  const valorMatch = text.match(/(?:TOTAL|VALOR)\s*:?\s*R\$\s*([\d.,]+)/i);
+  if (valorMatch) data.valor_total = 'R$ ' + valorMatch[1];
+  
+  // Consumo
+  const consumoMatch = text.match(/(\d+)\s*KWH/i);
+  if (consumoMatch) data.consumo_kwh = consumoMatch[1];
+  
+  // Número instalação
+  const instalacaoMatch = text.match(/(?:INSTALAÇÃO|UC|CONTA)[:\s]*(\d{6,})/i);
+  if (instalacaoMatch) data.numero_instalacao = instalacaoMatch[1];
+  
+  return data;
+}
+
+/**
+ * Extração específica para nota fiscal
+ */
+function extractNotaFiscalData(text) {
+  const data = {};
+  
+  // Número da NF
+  const nfMatch = text.match(/(?:NF-?e?|NOTA FISCAL)[:\s]*(\d+)/i);
+  if (nfMatch) data.numero_nf = nfMatch[1];
+  
+  // Chave de acesso
+  const chaveMatch = text.match(/(\d{44})/);
+  if (chaveMatch) data.chave_acesso = chaveMatch[1];
+  
+  // Data emissão
+  const emissaoMatch = text.match(/(?:EMISSÃO|EMITIDA)[:\s]*(\d{2}[\/\-]\d{2}[\/\-]\d{4})/i);
+  if (emissaoMatch) data.data_emissao = emissaoMatch[1];
+  
+  // Valor total
+  const valorMatch = text.match(/(?:VALOR TOTAL|TOTAL)[:\s]*R\$\s*([\d.,]+)/i);
+  if (valorMatch) data.valor_total = 'R$ ' + valorMatch[1];
+  
+  return data;
+}
+
+/**
+ * Extração específica para boleto
+ */
+function extractBoletoData(text) {
+  const data = {};
+  
+  // Código de barras
+  const barrasMatch = text.match(/(\d{5}\.\d{5}\s\d{5}\.\d{6}\s\d{5}\.\d{6}\s\d{1}\s\d{14})/);
+  if (barrasMatch) data.codigo_barras = barrasMatch[1];
+  
+  // Vencimento
+  const vencMatch = text.match(/(?:VENCIMENTO)[:\s]*(\d{2}[\/\-]\d{2}[\/\-]\d{4})/i);
+  if (vencMatch) data.vencimento = vencMatch[1];
+  
+  // Valor
+  const valorMatch = text.match(/(?:VALOR)[:\s]*R\$\s*([\d.,]+)/i);
+  if (valorMatch) data.valor = 'R$ ' + valorMatch[1];
+  
+  return data;
+}
+
+// ==================== ROTAS ====================
+
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// Rota de status
 app.get('/status', (req, res) => {
   res.json({ 
     status: 'online',
-    version: '1.0.0',
-    ocr_methods: [
-      'OCR.space API',
-      'Tesseract Local (se instalado)'
+    version: '2.0.0',
+    capabilities: [
+      'Análise inteligente de PDF',
+      'Detecção automática de tipo de documento',
+      'Conversão automática quando necessário',
+      'Extração de dados genérica',
+      'Suporte a múltiplos tipos de documento'
     ]
   });
 });
 
-// Rota de upload e processamento
+/**
+ * Rota principal de processamento - INTELIGENTE
+ */
 app.post('/process', upload.single('file'), async (req, res) => {
   let filePath = null;
   
@@ -318,34 +442,62 @@ app.post('/process', upload.single('file'), async (req, res) => {
     }
 
     filePath = req.file.path;
-    const method = req.body.method || 'auto';
+    const extractionMode = req.body.mode || 'smart'; // smart, ocr_only, text_only
     
-    console.log(`Processando arquivo: ${req.file.originalname}`);
-    console.log(`Método: ${method}`);
-    console.log(`Tamanho: ${req.file.size} bytes`);
+    console.log(`
+    ========================================
+    📄 Processando: ${req.file.originalname}
+    📊 Tamanho: ${(req.file.size / 1024).toFixed(2)} KB
+    🔍 Modo: ${extractionMode}
+    ========================================
+    `);
 
     let ocrText = '';
+    let processInfo = {};
     
-    // Tentar OCR com o método escolhido
-    if (method === 'tesseract') {
-      // Se for PDF, converter para imagem primeiro
-      let processPath = filePath;
-      if (path.extname(filePath).toLowerCase() === '.pdf') {
-        processPath = await pdfToImage(filePath);
-      }
-      ocrText = await ocrWithTesseract(processPath);
-      if (processPath !== filePath) {
-        await cleanupFile(processPath);
+    // Analisar o PDF primeiro (se for PDF)
+    if (req.file.mimetype === 'application/pdf') {
+      console.log('🔍 Analisando estrutura do PDF...');
+      const pdfAnalysis = await analyzePDF(filePath);
+      processInfo = pdfAnalysis;
+      
+      console.log(`
+      📊 Análise do PDF:
+      - Tem texto extraível: ${pdfAnalysis.hasText ? 'SIM ✅' : 'NÃO ❌'}
+      - Precisa OCR: ${pdfAnalysis.needsOCR ? 'SIM' : 'NÃO'}
+      - Tamanho: ${pdfAnalysis.fileSizeKB.toFixed(2)} KB
+      - Deve converter: ${pdfAnalysis.shouldConvertToImage ? 'SIM' : 'NÃO'}
+      `);
+      
+      // Decidir estratégia baseada na análise
+      if (extractionMode === 'smart') {
+        ocrText = await smartOCR(filePath, pdfAnalysis);
+      } else if (extractionMode === 'ocr_only') {
+        // Forçar OCR mesmo que tenha texto
+        if (pdfAnalysis.fileSizeKB > 1024) {
+          const imagePath = await pdfToImageOptimized(filePath);
+          ocrText = await ocrImage(imagePath, process.env.OCR_SPACE_API_KEY);
+          await fs.unlink(imagePath).catch(() => {});
+        } else {
+          ocrText = await ocrFile(filePath, process.env.OCR_SPACE_API_KEY);
+        }
+      } else if (extractionMode === 'text_only' && pdfAnalysis.hasText) {
+        // Extrair apenas texto nativo
+        const { stdout } = await execPromise(`pdftotext "${filePath}" -`);
+        ocrText = stdout;
       }
     } else {
-      // Usar OCR.space (padrão)
-      ocrText = await ocrWithOCRSpace(filePath);
+      // É uma imagem, fazer OCR direto
+      console.log('🖼️ Processando imagem...');
+      ocrText = await ocrFile(filePath, process.env.OCR_SPACE_API_KEY);
+      processInfo.isImage = true;
     }
 
-    // Extrair dados estruturados
-    const extractedData = extractDataFromText(ocrText);
+    // Extrair dados de forma inteligente
+    console.log('🧠 Extraindo dados inteligentemente...');
+    const extractedData = smartDataExtraction(ocrText);
 
-    // Adicionar metadados
+    // Montar resposta
     const result = {
       success: true,
       file: {
@@ -353,68 +505,83 @@ app.post('/process', upload.single('file'), async (req, res) => {
         size: req.file.size,
         type: req.file.mimetype
       },
-      method_used: method === 'auto' ? 'OCR.space API' : method,
+      processing_info: {
+        mode: extractionMode,
+        pdf_has_text: processInfo.hasText || false,
+        used_ocr: processInfo.needsOCR || !processInfo.hasText,
+        converted_to_image: processInfo.shouldConvertToImage && processInfo.needsOCR,
+        processing_time: new Date().toISOString()
+      },
+      document_type: extractedData.tipo_documento || 'Não identificado',
       extracted_data: extractedData,
-      raw_text: ocrText.substring(0, 1000) + '...', // Primeiros 1000 caracteres
-      processed_at: new Date().toISOString()
+      raw_text: req.body.include_raw_text === 'true' ? ocrText : ocrText.substring(0, 500) + '...',
+      confidence_score: extractedData.qualidade_extracao?.confianca || 0
     };
+
+    console.log(`
+    ✅ Processamento concluído!
+    📄 Tipo identificado: ${result.document_type}
+    🎯 Confiança: ${result.confidence_score}%
+    ========================================
+    `);
 
     res.json(result);
 
   } catch (error) {
-    console.error('Erro no processamento:', error);
+    console.error('❌ Erro no processamento:', error);
     res.status(500).json({ 
       error: error.message,
-      details: 'Verifique se o arquivo é válido e tente novamente'
+      details: 'Verifique se o arquivo é válido',
+      suggestion: 'Tente com mode=ocr_only se o PDF for baseado em imagem'
     });
   } finally {
     // Limpar arquivo temporário
     if (filePath) {
-      await cleanupFile(filePath);
+      await fs.unlink(filePath).catch(() => {});
     }
   }
 });
 
-// Rota para processar via URL
-app.post('/process-url', async (req, res) => {
-  const { url } = req.body;
-  
-  if (!url) {
-    return res.status(400).json({ error: 'URL não fornecida' });
-  }
-
-  let tempFile = null;
-  
-  try {
-    // Baixar arquivo da URL
-    const response = await axios.get(url, { responseType: 'arraybuffer' });
-    const extension = path.extname(new URL(url).pathname) || '.pdf';
-    tempFile = `uploads/temp-${Date.now()}${extension}`;
-    
-    await fs.mkdir('uploads', { recursive: true });
-    await fs.writeFile(tempFile, response.data);
-    
-    // Processar arquivo
-    const ocrText = await ocrWithOCRSpace(tempFile);
-    const extractedData = extractDataFromText(ocrText);
-    
-    res.json({
-      success: true,
-      url: url,
-      extracted_data: extractedData,
-      processed_at: new Date().toISOString()
-    });
-    
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  } finally {
-    if (tempFile) {
-      await cleanupFile(tempFile);
-    }
-  }
+/**
+ * Rota para informações sobre capacidades
+ */
+app.get('/capabilities', (req, res) => {
+  res.json({
+    supported_formats: ['PDF', 'JPG', 'JPEG', 'PNG', 'GIF', 'BMP'],
+    max_file_size: '50MB',
+    document_types: [
+      'Conta de Energia',
+      'Nota Fiscal',
+      'Boleto',
+      'Contrato',
+      'Extrato Bancário',
+      'Currículo',
+      'Receita Médica',
+      'Certidão/Certificado',
+      'Orçamento',
+      'Recibo',
+      'Documento Genérico'
+    ],
+    extraction_modes: {
+      smart: 'Detecta automaticamente o melhor método',
+      ocr_only: 'Força uso de OCR mesmo com texto',
+      text_only: 'Extrai apenas texto nativo (PDFs)'
+    },
+    data_extracted: [
+      'valores_monetarios',
+      'datas',
+      'cpf_cnpj',
+      'emails',
+      'telefones',
+      'numeros_documento',
+      'empresas',
+      'palavras_chave',
+      'dados_especificos_por_tipo'
+    ]
+  });
 });
 
-// Tratamento de erros global
+// Tratamento de erros
 app.use((error, req, res, next) => {
   console.error('Erro não tratado:', error);
   res.status(500).json({
@@ -426,21 +593,43 @@ app.use((error, req, res, next) => {
 // Inicializar servidor
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`
-🚀 Servidor OCR rodando!
+🚀 Servidor Universal PDF OCR v2.0
 📍 URL: http://localhost:${PORT}
-📄 API Endpoints:
-   - GET  /          → Interface Web
-   - GET  /status    → Status da API
-   - POST /process   → Upload e processar arquivo
-   - POST /process-url → Processar arquivo de URL
+🧠 Modo: Inteligente com detecção automática
+
+📄 Endpoints:
+   GET  /              → Interface Web
+   GET  /status        → Status da API
+   GET  /capabilities  → Capacidades do sistema
+   POST /process       → Processar arquivo
+
+🎯 Recursos:
+   ✅ Detecção automática de tipo de documento
+   ✅ Decisão inteligente de conversão
+   ✅ Extração genérica de dados
+   ✅ Suporte a múltiplos formatos
+   ✅ Análise de confiança
   `);
 });
 
-// Tratamento de erros não capturados
-process.on('uncaughtException', (error) => {
-  console.error('Erro não capturado:', error);
-});
+// Verificar dependências na inicialização
+async function checkDependencies() {
+  console.log('🔍 Verificando dependências...');
+  
+  try {
+    await execPromise('pdftoppm -version');
+    console.log('✅ poppler-utils instalado');
+  } catch {
+    console.log('⚠️  poppler-utils não encontrado - conversão PDF limitada');
+    console.log('    Instale com: apk add poppler-utils');
+  }
+  
+  try {
+    await execPromise('tesseract --version');
+    console.log('✅ tesseract instalado');
+  } catch {
+    console.log('⚠️  tesseract não encontrado - OCR local indisponível');
+  }
+}
 
-process.on('unhandledRejection', (error) => {
-  console.error('Promise rejeitada não tratada:', error);
-});
+checkDependencies();
